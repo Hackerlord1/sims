@@ -1,0 +1,16 @@
+node_modules
+.next
+.pgdata
+.pgdata.log
+mariadb-data
+mariadb-data.cnf
+mariadb-data.log
+storage
+.env
+.env.*
+!.env.example
+test-results
+playwright-report
+coverage
+.claude
+*.tsbuildinfo

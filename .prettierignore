@@ -1,0 +1,15 @@
+.next
+.pgdata
+mariadb-data
+node_modules
+coverage
+test-results
+playwright-report
+storage
+samples
+prisma/migrations
+public/swagger
+next-env.d.ts
+*.min.js
+package-lock.json
+.claude

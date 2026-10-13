@@ -1,0 +1,2400 @@
+// SIMS — Savemore Investigation Management System — schema v2
+//
+// Conventions
+//  - Internal ids are CUIDs. Business references (SIMS/2026/0001 …) are separate, unique and immutable.
+//  - Money is Decimal(18,2). Never Float.
+//  - isDemo marks fictional seed data (shown as DEMO DATA in the UI).
+//  - `version` supports optimistic locking on rows edited by several people.
+//  - Business tables carry the soft-delete block (isDeleted … restorationReason) and archivedAt.
+//    Lists exclude deleted rows unless the Recycle Bin asks for them.
+//  - Rows that must never be silently changed (audit logs, evidence originals, custody records,
+//    verified recoveries) are protected by database triggers (see the guards migration).
+//  - MariaDB sizing: Prisma maps a bare String to VARCHAR(191). Every free-text column carries an
+//    explicit @db.VarChar(n) / @db.Text / @db.MediumText at least as large as its validation limit
+//    (the registry `max`, or the route's Zod schema), so valid input is never truncated.
+//  - Lists of strings are Json columns holding string[] (MariaDB has no array type). They are read
+//    and written whole; the only database-side filter is the statement-scoped `flags` lookup.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // MariaDB 10.11 on the production host (Prisma's MySQL connector). See docs/MYSQL-MIGRATION-PLAN.md.
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ═════════════════════════════ Enums ═════════════════════════════
+
+enum RoleCode {
+  SYSTEM_ADMIN
+  LEAD_INVESTIGATOR
+  INVESTIGATOR
+  INTERNAL_AUDIT_REVIEWER
+  COMPLIANCE_REVIEWER
+  LEGAL_OFFICER
+  HR_OFFICER
+  FINANCE_REVIEWER
+  MANAGEMENT_APPROVER
+  EXECUTIVE_READ_ONLY
+  EXTERNAL_ADVOCATE_RESTRICTED
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum Confidentiality {
+  STANDARD
+  CONFIDENTIAL
+  HIGHLY_CONFIDENTIAL
+  RESTRICTED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum CaseCategory {
+  INVOICE_IRREGULARITY
+  BAD_CHEQUE
+  FINANCIAL_MISCONDUCT
+  CUSTOMER_DEBT
+  CASH_MISAPPROPRIATION
+  STOCK_LOSS
+  PROCUREMENT_FRAUD
+  PAYROLL_FRAUD
+  OTHER
+}
+
+enum CaseStatus {
+  DRAFT
+  PRELIMINARY_REVIEW
+  UNDER_INTERNAL_INVESTIGATION
+  AWAITING_DOCUMENTS
+  AWAITING_INTERVIEW
+  AWAITING_MANAGEMENT_DECISION
+  REFERRED_FOR_CRIMINAL_ACTION
+  REFERRED_FOR_CIVIL_ACTION
+  CRIMINAL_AND_CIVIL_ACTION
+  DISCIPLINARY_PROCESS
+  WRITE_OFF_APPROVAL
+  RECOVERY_MONITORING
+  CLOSED
+  REOPENED
+}
+
+enum InvestigationStage {
+  INTAKE
+  PLANNING
+  EVIDENCE_GATHERING
+  INTERVIEWS
+  ANALYSIS
+  REPORTING
+  ACTION
+  MONITORING
+  CONCLUDED
+}
+
+enum CaseAssignmentRole {
+  LEAD
+  SUPPORTING
+  SUPERVISOR
+  REVIEWER
+  LEGAL
+  HR
+  FINANCE
+  EXTERNAL_ADVOCATE
+}
+
+enum SubFileStatus {
+  OPEN
+  IN_PROGRESS
+  AWAITING_INFORMATION
+  COMPLETED
+  CLOSED
+}
+
+enum PartyRole {
+  PERSON_OF_INTEREST
+  SUSPECT_REPORTED_TO_AUTHORITIES
+  WITNESS
+  EMPLOYEE
+  CUSTOMER
+  COMPLAINANT
+  GUARANTOR
+  POLICE_OR_DCI_OFFICER
+  ADVOCATE
+  OTHER_PARTY
+}
+
+enum PartyKind {
+  INDIVIDUAL
+  ORGANISATION
+}
+
+enum InvoiceClassification {
+  VALID_AND_SUPPORTED
+  VALID_BUT_UNPAID
+  DISPUTED
+  CUSTOMER_NOT_IDENTIFIED
+  NO_PROOF_OF_DELIVERY
+  DUPLICATE
+  PRESALE_INVOICE
+  FICTITIOUS_INVOICE_SUSPECTED
+  RAISED_UNDER_MANAGEMENT_INSTRUCTION
+  PAYMENT_MADE_TO_EMPLOYEE
+  CASH_COLLECTED_NOT_REMITTED
+  MPESA_PAID_TO_PERSONAL_NUMBER
+  PARTLY_PAID
+  REQUIRES_FURTHER_INVESTIGATION
+  CLEARED
+}
+
+enum ProofOfDeliveryStatus {
+  AVAILABLE
+  MISSING
+  PARTIAL
+  DISPUTED
+  NOT_REQUIRED
+}
+
+enum ErpPostingStatus {
+  POSTED
+  NOT_POSTED
+  REVERSED
+  UNKNOWN
+}
+
+enum CustomerVerificationOutcome {
+  NOT_CONTACTED
+  CONFIRMED
+  PARTLY_CONFIRMED
+  DISPUTED
+  CUSTOMER_NOT_FOUND
+}
+
+enum RecoveryProgress {
+  NOT_STARTED
+  IN_PROGRESS
+  PARTLY_RECOVERED
+  RECOVERED
+  WRITTEN_OFF
+  NOT_RECOVERABLE
+}
+
+enum ChequeStatus {
+  RECEIVED
+  DEPOSITED
+  CLEARED
+  DISHONOURED
+  REPLACED
+  RECOVERED
+  WRITTEN_OFF
+}
+
+enum CriminalComplaintStatus {
+  NOT_REPORTED
+  REPORTED
+  UNDER_INVESTIGATION
+  CHARGED
+  CONCLUDED
+  NOT_PURSUED
+}
+
+enum InterviewType {
+  FACT_FINDING
+  PERSON_OF_INTEREST
+  WITNESS
+  CUSTOMER_VERIFICATION
+  FOLLOW_UP
+  EXIT
+}
+
+enum StatementKind {
+  WITNESS_STATEMENT
+  EMPLOYEE_EXPLANATION
+  CUSTOMER_CONFIRMATION
+  POLICE_STATEMENT
+  AFFIDAVIT
+  OTHER
+}
+
+enum WorkLogStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum SupervisorReviewStatus {
+  PENDING
+  REVIEWED
+  RETURNED
+}
+
+enum TaskStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  WAITING_FOR_INTERNAL_PARTY
+  WAITING_FOR_EXTERNAL_PARTY
+  COMPLETED
+  CANCELLED
+  OVERDUE
+}
+
+enum TaskCategory {
+  GENERAL
+  DOCUMENT_REQUEST
+  INTERVIEW
+  COURT_DATE
+  MANAGEMENT_APPROVAL
+  POLICE_FOLLOW_UP
+  DCI_FOLLOW_UP
+  DPP_FOLLOW_UP
+  ADVOCATE_FOLLOW_UP
+  DEMAND_FOLLOW_UP
+  RECOVERY_FOLLOW_UP
+}
+
+enum EvidenceCategory {
+  DOCUMENT
+  INVOICE_COPY
+  DELIVERY_NOTE
+  CHEQUE_IMAGE
+  BANK_RETURN_MEMO
+  SIGNED_STATEMENT
+  IDENTIFICATION_DOCUMENT
+  FINANCIAL_STATEMENT
+  PHOTOGRAPH
+  AUDIO
+  VIDEO
+  EMAIL_OR_MESSAGE
+  COURT_ORDER
+  JUDGMENT
+  RECEIPT
+  REPORT
+  OTHER
+}
+
+enum EvidenceAccessAction {
+  UPLOAD
+  VIEW
+  PREVIEW
+  DOWNLOAD
+  NEW_WORKING_VERSION
+  HASH_VERIFIED
+  HASH_MISMATCH
+  LEGAL_HOLD_ON
+  LEGAL_HOLD_OFF
+  METADATA_EDIT
+}
+
+enum FindingStatus {
+  DRAFT
+  SUBMITTED
+  RETURNED
+  DECIDED
+}
+
+enum EvidenceSufficiency {
+  SUFFICIENT
+  PARTLY_SUFFICIENT
+  INSUFFICIENT
+}
+
+enum RecommendationType {
+  NO_FURTHER_ACTION
+  ADDITIONAL_INVESTIGATION
+  CRIMINAL_ACTION
+  CIVIL_ACTION
+  CRIMINAL_AND_CIVIL_ACTION
+  DISCIPLINARY_OR_ADMINISTRATIVE_ACTION
+  INSURANCE_CLAIM
+  DEBT_RECOVERY_ARRANGEMENT
+  WRITE_OFF
+  CONTROL_IMPROVEMENT
+  EMPLOYEE_TRAINING
+  REFERRAL_TO_ANOTHER_AUTHORITY
+}
+
+enum DecisionOutcome {
+  APPROVED
+  APPROVED_WITH_CONDITIONS
+  RETURNED_FOR_MORE_WORK
+  REJECTED
+}
+
+enum CriminalStatus {
+  PREPARING
+  REPORTED
+  UNDER_POLICE_INVESTIGATION
+  WITH_DPP
+  CHARGED
+  IN_COURT
+  CONCLUDED
+  WITHDRAWN
+  CLOSED
+}
+
+enum CriminalMilestoneType {
+  COMPLAINT_RECORDED
+  OB_NUMBER_OBTAINED
+  STATEMENTS_RECORDED
+  SUSPECT_INTERVIEWED
+  AFFIDAVIT_PREPARED
+  FINANCIAL_INSTITUTION_SERVED
+  BANK_RESPONSE_RECEIVED
+  MPESA_RESPONSE_RECEIVED
+  FORENSIC_ANALYSIS_COMPLETED
+  FILE_FORWARDED_TO_DPP
+  DPP_DIRECTIONS_RECEIVED
+  FURTHER_INVESTIGATION_REQUESTED
+  DECISION_TO_CHARGE
+  WARRANT_ISSUED
+  ARREST_COMPLETED
+  BOND_OR_BAIL
+  PLEA_TAKEN
+  TRIAL
+  JUDGMENT
+  CLOSURE
+}
+
+enum CivilStatus {
+  REFERRED
+  DEMAND_ISSUED
+  NEGOTIATION
+  APPROVED_TO_SUE
+  FILED
+  IN_COURT
+  JUDGMENT_OBTAINED
+  EXECUTION
+  SETTLED
+  WITHDRAWN
+  CLOSED
+}
+
+enum CourtEventType {
+  MENTION
+  HEARING
+  APPLICATION
+  RULING
+  MEDIATION
+  NEGOTIATION
+  CONSENT
+  JUDGMENT
+  DECREE
+  EXECUTION
+  GARNISHEE_PROCEEDINGS
+  AUCTION
+  PAYMENT_PLAN
+  APPEAL
+  CLOSURE
+}
+
+enum DisciplinaryStatus {
+  HR_REFERRAL
+  SHOW_CAUSE_ISSUED
+  RESPONSE_RECEIVED
+  HEARING_SCHEDULED
+  DECISION_MADE
+  UNDER_APPEAL
+  FINAL_OUTCOME
+  CLOSED
+}
+
+enum WriteOffStatus {
+  DRAFT
+  FINANCE_REVIEW
+  MANAGEMENT_APPROVAL
+  BOARD_APPROVAL
+  APPROVED
+  REJECTED
+  CLOSED
+}
+
+enum CostPathway {
+  INVESTIGATION
+  CRIMINAL
+  CIVIL
+  RECOVERY
+}
+
+enum ExpenseCategory {
+  TRANSPORT
+  FUEL
+  MILEAGE
+  VEHICLE_HIRE
+  ACCOMMODATION
+  MEALS
+  SUBSISTENCE
+  FIELD_ALLOWANCE
+  AIRTIME
+  DATA
+  PRINTING
+  PHOTOCOPYING
+  COURIER
+  CERTIFICATION
+  INTERVIEW_COSTS
+  EXTERNAL_INVESTIGATOR
+  FORENSIC_ANALYSIS
+  BANK_STATEMENT_CHARGES
+  MPESA_STATEMENT_CHARGES
+  ADVOCATE_FEES
+  COURT_FILING_FEES
+  PROCESS_SERVER
+  WITNESS_COSTS
+  AUCTIONEER
+  ASSET_TRACING
+  VALUATION
+  RECOVERY_AGENT
+  OTHER_APPROVED_EXPENSE
+}
+
+enum ExpenseStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PARTIALLY_APPROVED
+  REJECTED
+  PAID
+  AWAITING_RECEIPT
+  ACCOUNTED_FOR
+  CLOSED
+}
+
+enum PaymentMethod {
+  CASH
+  MPESA
+  BANK_TRANSFER
+  CHEQUE
+  CORPORATE_CARD
+  PETTY_CASH
+  IMPREST
+  OTHER
+}
+
+enum Recoverability {
+  UNDER_REVIEW
+  RECOVERABLE
+  NOT_RECOVERABLE
+}
+
+enum AdvanceStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  ISSUED
+  PARTLY_ACCOUNTED
+  ACCOUNTED
+  CLOSED
+}
+
+enum BudgetStatus {
+  PROPOSED
+  APPROVED
+  REVISED
+}
+
+enum RecoveryMethod {
+  CASH
+  MPESA
+  BANK_TRANSFER
+  CHEQUE
+  SALARY_DEDUCTION
+  COURT_EXECUTION
+  GARNISHEE
+  AUCTION_PROCEEDS
+  INSURANCE
+  SET_OFF
+  OTHER
+}
+
+enum RecoveryStatus {
+  RECORDED
+  VERIFIED
+  REJECTED
+}
+
+enum InstitutionType {
+  BANK
+  MPESA
+  SACCO
+  OTHER
+}
+
+enum StatementFormat {
+  PDF
+  SCANNED_PDF
+  CSV
+  XLSX
+  MPESA_PDF
+  BANK_PDF
+}
+
+enum StatementStatus {
+  UPLOADED
+  QUEUED
+  PARSING
+  PARSED
+  NEEDS_MANUAL_REVIEW
+  FAILED
+  REVIEWED
+}
+
+enum LinkClass {
+  VERIFIED_DIRECT_MATCH
+  EXACT_REFERENCE_MATCH
+  PROBABLE_NAME_MATCH
+  TELEPHONE_NUMBER_MATCH
+  USER_CONFIRMED_MATCH
+  UNRESOLVED_POSSIBLE_MATCH
+}
+
+enum LinkStatus {
+  SUGGESTED
+  CONFIRMED
+  REJECTED
+}
+
+enum LinkTarget {
+  PARTY
+  STATEMENT_OWNER
+  INVOICE
+  CHEQUE
+  KNOWN_ACCOUNT
+}
+
+enum ImportStatus {
+  VALIDATED
+  QUEUED
+  IMPORTING
+  COMPLETED
+  PARTIALLY_COMPLETED
+  FAILED
+  ROLLED_BACK
+  CANCELLED
+  AWAITING_APPROVAL
+}
+
+enum ImportMode {
+  ATOMIC
+  PARTIAL
+}
+
+enum DuplicateStrategy {
+  SKIP
+  UPDATE_EXISTING
+  CREATE_NEW_VERSION
+  IMPORT_SEPARATELY
+  STOP_ENTIRE_BATCH
+}
+
+enum ImportRowStatus {
+  VALID
+  INVALID
+  DUPLICATE
+  IMPORTED
+  UPDATED
+  SKIPPED
+  FAILED
+}
+
+enum BulkActionType {
+  ARCHIVE
+  UNARCHIVE
+  SOFT_DELETE
+  RESTORE
+  REASSIGN
+  CHANGE_STATUS
+  EXPORT
+}
+
+enum DeletionRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  BLOCKED
+  CANCELLED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum ReportFormat {
+  PDF
+  DOCX
+  XLSX
+  CSV
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+enum AlertType {
+  REPEATED_FAILED_LOGINS
+  PERMISSION_BYPASS_ATTEMPT
+  LARGE_EXPORT
+  EVIDENCE_HASH_MISMATCH
+  ADMIN_ROLE_CHANGE
+  DEMO_MODE_IN_PRODUCTION
+  PERMANENT_DELETION
+  BULK_IMPORT_FAILURE
+}
+
+// ═════════════════════ Organisation & identity ═════════════════════
+
+model Company {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  isDemo    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  branches Branch[]
+  cases    Case[]
+  scopes   UserScope[]
+  users    User[]
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  companyId String
+  code      String
+  name      String
+  isDemo    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  company Company     @relation(fields: [companyId], references: [id])
+  cases   Case[]
+  scopes  UserScope[]
+  users   User[]
+
+  @@unique([companyId, code])
+}
+
+model Department {
+  id     String  @id @default(cuid())
+  name   String  @unique
+  isDemo Boolean @default(false)
+  users  User[]
+}
+
+model User {
+  id                 String          @id @default(cuid())
+  username           String          @unique
+  email              String          @unique @db.VarChar(254)
+  fullName           String
+  employeeNumber     String?         @unique
+  telephone          String?
+  jobTitle           String?
+  role               RoleCode
+  status             UserStatus      @default(ACTIVE)
+  clearance          Confidentiality @default(STANDARD)
+  companyId          String?
+  branchId           String?
+  departmentId       String?
+  passwordHash       String          @db.VarChar(255)
+  passwordChangedAt  DateTime?
+  failedLoginCount   Int             @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  // Prepared for Microsoft Entra ID: the object id of the linked directory account.
+  externalIdentityId String?         @unique
+  mfaSecret          String?         @db.Text // AES-256-GCM encrypted
+  mfaEnabled         Boolean         @default(false)
+  // Enrolment in progress: the new secret only replaces mfaSecret once a code from it is confirmed.
+  mfaPendingSecret   String?         @db.Text // AES-256-GCM encrypted
+  // Last accepted TOTP time step, so a code cannot be replayed within its validity window.
+  mfaLastUsedStep    Int?
+  preferences        Json? // { theme, fontScale, reducedMotion, highContrast }
+  isDemoAdmin        Boolean         @default(false)
+  isDemo             Boolean         @default(false)
+  // Per-user restrictions on top of the role matrix, as "MODULE:ACTION" (e.g. "EXPENSES:EDIT").
+  // They can only take permissions away; "MODULE:VIEW" removes the whole module.
+  permissionDenials  Json // string[]
+  // May approve other people's pending data changes (system administrators always may).
+  dataApprover       Boolean         @default(false)
+  version            Int             @default(1)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  company    Company?    @relation(fields: [companyId], references: [id])
+  branch     Branch?     @relation(fields: [branchId], references: [id])
+  department Department? @relation(fields: [departmentId], references: [id])
+
+  sessions        Session[]
+  resetTokens     PasswordResetToken[]
+  scopes          UserScope[]
+  assignments     CaseAssignment[]
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+  leadCases       Case[]               @relation("CaseLead")
+  supervisedCases Case[]               @relation("CaseSupervisor")
+  createdCases    Case[]               @relation("CaseCreator")
+  subFiles        SubFile[]            @relation("SubFileInvestigator")
+  tasksAssigned   Task[]               @relation("TaskAssignee")
+  workLogs        WorkLog[]            @relation("WorkLogInvestigator")
+  workLogsOwned   WorkLog[]            @relation("WorkLogResponsible")
+  expenses        Expense[]            @relation("ExpenseEmployee")
+  advances        Advance[]            @relation("AdvanceEmployee")
+  evidenceUploads Evidence[]           @relation("EvidenceUploader")
+  evidenceAccess  EvidenceAccess[]
+  custodyEvents   CustodyEvent[]
+  changeRequests  ChangeRequest[]      @relation("ChangeRequester")
+  changeReviews   ChangeRequest[]      @relation("ChangeReviewer")
+
+  @@index([role])
+  @@index([status])
+}
+
+model UserScope {
+  id        String   @id @default(cuid())
+  userId    String
+  companyId String
+  branchId  String? // null = all branches of the company
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch? @relation(fields: [branchId], references: [id])
+
+  @@unique([userId, companyId, branchId])
+}
+
+model Session {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique
+  userId      String
+  expiresAt   DateTime
+  lastSeenAt  DateTime  @default(now())
+  mfaVerified Boolean   @default(false)
+  // Set by a successful password re-entry; sensitive actions require it to be recent.
+  reauthAt    DateTime?
+  ipAddress   String?
+  userAgent   String?   @db.VarChar(300)
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ReferenceCounter {
+  key       String   @id
+  value     Int
+  updatedAt DateTime @updatedAt
+}
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+// ═════════════════════════════ Cases ═════════════════════════════
+
+model Case {
+  id                         String             @id @default(cuid())
+  reference                  String             @unique @db.VarChar(300)
+  title                      String             @db.VarChar(300)
+  companyId                  String
+  businessUnit               String?            @db.VarChar(300)
+  branchId                   String?
+  location                   String?            @db.VarChar(300)
+  category                   CaseCategory
+  description                String?            @db.MediumText
+  allegationSummary          String?            @db.MediumText
+  referralSource             String?            @db.VarChar(300)
+  openedAt                   DateTime           @default(now())
+  incidentDate               DateTime?
+  incidentPeriodFrom         DateTime?
+  incidentPeriodTo           DateTime?
+  leadInvestigatorId         String?
+  supervisingManagerId       String?
+  priority                   Priority           @default(MEDIUM)
+  confidentiality            Confidentiality    @default(CONFIDENTIAL)
+  financialRisk              RiskLevel          @default(MEDIUM)
+  status                     CaseStatus         @default(DRAFT)
+  stage                      InvestigationStage @default(INTAKE)
+  targetClosureDate          DateTime?
+  actualClosureDate          DateTime?
+  closureReason              String?            @db.VarChar(300)
+  currency                   String             @default("KES") @db.VarChar(3)
+  // Investigator-entered exposure. Recovered, written-off, remaining exposure, unsupported invoice
+  // value, bad-cheque value and all costs are derived from their source records, never typed in.
+  grossAmount                Decimal            @default(0) @db.Decimal(18, 2)
+  amountDemanded             Decimal            @default(0) @db.Decimal(18, 2)
+  amountDisputed             Decimal            @default(0) @db.Decimal(18, 2)
+  amountAcknowledged         Decimal            @default(0) @db.Decimal(18, 2)
+  amountConfirmedRecoverable Decimal            @default(0) @db.Decimal(18, 2)
+  legalHold                  Boolean            @default(false)
+  lastActivityAt             DateTime           @default(now())
+  isDemo                     Boolean            @default(false)
+  version                    Int                @default(1)
+  createdById                String
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
+  isDeleted                  Boolean            @default(false)
+  deletedAt                  DateTime?
+  deletedById                String?
+  deletionReason             String?            @db.Text
+  deletionBatchId            String?
+  restoredAt                 DateTime?
+  restoredById               String?
+  restorationReason          String?            @db.Text
+  archivedAt                 DateTime?
+
+  company            Company @relation(fields: [companyId], references: [id])
+  branch             Branch? @relation(fields: [branchId], references: [id])
+  leadInvestigator   User?   @relation("CaseLead", fields: [leadInvestigatorId], references: [id])
+  supervisingManager User?   @relation("CaseSupervisor", fields: [supervisingManagerId], references: [id])
+  createdBy          User    @relation("CaseCreator", fields: [createdById], references: [id])
+
+  assignments     CaseAssignment[]
+  statusHistory   CaseStatusHistory[]
+  reopenings      CaseReopening[]
+  closures        CaseClosure[]
+  subFiles        SubFile[]
+  parties         Party[]
+  invoices        Invoice[]
+  cheques         Cheque[]
+  interviews      Interview[]
+  statements      PartyStatement[]
+  evidence        Evidence[]
+  workLogs        WorkLog[]
+  tasks           Task[]
+  findings        Finding[]
+  criminalMatters CriminalMatter[]
+  civilMatters    CivilMatter[]
+  disciplinary    DisciplinaryCase[]
+  writeOffs       WriteOff[]
+  expenses        Expense[]
+  advances        Advance[]
+  budgets         Budget[]
+  recoveries      Recovery[]
+  finStatements   FinancialStatement[]
+  knownAccounts   KnownAccount[]
+  reports         GeneratedReport[]
+
+  changeRequests ChangeRequest[]
+
+  @@index([status, isDeleted])
+  @@index([companyId, branchId])
+  @@index([leadInvestigatorId])
+  @@index([priority])
+  @@index([openedAt])
+  @@index([lastActivityAt])
+}
+
+model CaseAssignment {
+  id           String             @id @default(cuid())
+  caseId       String
+  userId       String
+  role         CaseAssignmentRole
+  active       Boolean            @default(true)
+  assignedById String?
+  createdAt    DateTime           @default(now())
+  endedAt      DateTime?
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([caseId, userId, role])
+  @@index([userId, active])
+}
+
+model CaseStatusHistory {
+  id          String      @id @default(cuid())
+  caseId      String
+  fromStatus  CaseStatus?
+  toStatus    CaseStatus
+  reason      String?     @db.Text
+  changedById String
+  changedAt   DateTime    @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId, changedAt])
+}
+
+model CaseClosure {
+  id         String   @id @default(cuid())
+  caseId     String
+  reason     String   @db.Text
+  summary    String   @db.MediumText
+  checklist  Json // snapshot of the closure checks at closure time
+  closedById String
+  closedAt   DateTime @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+model CaseReopening {
+  id             String     @id @default(cuid())
+  caseId         String
+  reason         String     @db.Text
+  newInformation String     @db.MediumText
+  previousStatus CaseStatus
+  reopenedById   String
+  reopenedAt     DateTime   @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+// ═════════════════════════ Sub-files ═════════════════════════
+
+model SubFile {
+  id                String        @id @default(cuid())
+  reference         String        @unique @db.VarChar(300)
+  caseId            String
+  sequence          Int
+  title             String        @db.VarChar(300)
+  location          String?       @db.VarChar(300)
+  allegation        String?       @db.MediumText
+  transactionType   String?       @db.VarChar(300)
+  periodFrom        DateTime?
+  periodTo          DateTime?
+  investigatorId    String?
+  amountInvolved    Decimal       @default(0) @db.Decimal(18, 2)
+  status            SubFileStatus @default(OPEN)
+  findings          String?       @db.MediumText
+  recommendation    String?       @db.MediumText
+  targetDate        DateTime?
+  isDemo            Boolean       @default(false)
+  version           Int           @default(1)
+  createdById       String
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  isDeleted         Boolean       @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?       @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?       @db.Text
+  archivedAt        DateTime?
+
+  case           Case                 @relation(fields: [caseId], references: [id])
+  investigator   User?                @relation("SubFileInvestigator", fields: [investigatorId], references: [id])
+  invoices       Invoice[]
+  cheques        Cheque[]
+  evidence       Evidence[]
+  workLogs       WorkLog[]
+  tasks          Task[]
+  expenses       Expense[]
+  recoveries     Recovery[]
+  statements     FinancialStatement[]
+  findingRecords Finding[]
+  writeOffs      WriteOff[]
+
+  @@unique([caseId, sequence])
+  @@index([caseId, isDeleted])
+}
+
+// ═════════════════════════ Parties ═════════════════════════
+
+model Party {
+  id                   String          @id @default(cuid())
+  caseId               String
+  role                 PartyRole
+  kind                 PartyKind       @default(INDIVIDUAL)
+  name                 String          @db.VarChar(300)
+  idNumber             String?         @db.VarChar(300) // sensitive; masked in lists
+  telephone            String?         @db.VarChar(300)
+  email                String?         @db.VarChar(254)
+  address              String?         @db.Text
+  organisation         String?         @db.VarChar(300)
+  employeeNumber       String?         @db.VarChar(300)
+  customerCode         String?         @db.VarChar(300)
+  relationshipToCase   String?         @db.VarChar(300)
+  accessClassification Confidentiality @default(CONFIDENTIAL)
+  notes                String?         @db.MediumText
+  isDemo               Boolean         @default(false)
+  version              Int             @default(1)
+  createdById          String
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  isDeleted            Boolean         @default(false)
+  deletedAt            DateTime?
+  deletedById          String?
+  deletionReason       String?         @db.Text
+  deletionBatchId      String?
+  restoredAt           DateTime?
+  restoredById         String?
+  restorationReason    String?         @db.Text
+  archivedAt           DateTime?
+
+  case            Case                 @relation(fields: [caseId], references: [id])
+  interviews      Interview[]
+  statements      PartyStatement[]
+  ownedStatements FinancialStatement[]
+  knownAccounts   KnownAccount[]
+
+  @@index([caseId, isDeleted])
+  @@index([name])
+  @@index([telephone])
+}
+
+// ═════════════════════ Invoices & cheques ═════════════════════
+
+model Invoice {
+  id                   String                      @id @default(cuid())
+  caseId               String
+  subFileId            String?
+  invoiceNumber        String                      @db.VarChar(300)
+  invoiceDate          DateTime
+  customerName         String                      @db.VarChar(300)
+  customerCode         String?                     @db.VarChar(300)
+  salesLocation        String?                     @db.VarChar(300)
+  deliveryLocation     String?                     @db.VarChar(300)
+  invoiceAmount        Decimal                     @db.Decimal(18, 2)
+  amountPaid           Decimal                     @default(0) @db.Decimal(18, 2)
+  amountDisputed       Decimal                     @default(0) @db.Decimal(18, 2)
+  amountAcknowledged   Decimal                     @default(0) @db.Decimal(18, 2)
+  salesRepresentative  String?                     @db.VarChar(300)
+  deliveryPerson       String?                     @db.VarChar(300)
+  vehicleReference     String?                     @db.VarChar(300)
+  deliveryNoteNumber   String?                     @db.VarChar(300)
+  proofOfDelivery      ProofOfDeliveryStatus       @default(MISSING)
+  erpPostingStatus     ErpPostingStatus            @default(UNKNOWN)
+  customerVerification CustomerVerificationOutcome @default(NOT_CONTACTED)
+  classification       InvoiceClassification       @default(REQUIRES_FURTHER_INVESTIGATION)
+  observations         String?                     @db.MediumText
+  responsiblePerson    String?                     @db.VarChar(300)
+  recoveryStatus       RecoveryProgress            @default(NOT_STARTED)
+  importBatchId        String?
+  isDemo               Boolean                     @default(false)
+  version              Int                         @default(1)
+  createdById          String
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+  isDeleted            Boolean                     @default(false)
+  deletedAt            DateTime?
+  deletedById          String?
+  deletionReason       String?                     @db.Text
+  deletionBatchId      String?
+  restoredAt           DateTime?
+  restoredById         String?
+  restorationReason    String?                     @db.Text
+  archivedAt           DateTime?
+
+  case       Case            @relation(fields: [caseId], references: [id])
+  subFile    SubFile?        @relation(fields: [subFileId], references: [id])
+  cheques    ChequeInvoice[]
+  recoveries Recovery[]
+
+  @@index([caseId, isDeleted])
+  @@index([invoiceNumber])
+  @@index([customerName])
+  @@index([invoiceDate])
+  // The all-cases invoice register lists live invoices newest first. Without this index MariaDB
+  // joins every visible case and sorts all their invoices to return one page (~800 ms at 100,000
+  // invoices); with it, it reads the index in date order and stops after the page (~250 ms).
+  @@index([isDeleted, archivedAt, invoiceDate])
+}
+
+model Cheque {
+  id                      String                  @id @default(cuid())
+  caseId                  String
+  subFileId               String?
+  chequeNumber            String                  @db.VarChar(300)
+  bank                    String                  @db.VarChar(300)
+  bankBranch              String?                 @db.VarChar(300)
+  accountNumberMasked     String?                 @db.VarChar(300)
+  accountName             String?                 @db.VarChar(300)
+  chequeDate              DateTime?
+  amount                  Decimal                 @db.Decimal(18, 2)
+  dateReceived            DateTime?
+  dateDeposited           DateTime?
+  dateDishonoured         DateTime?
+  dishonourReason         String?                 @db.VarChar(300)
+  bankReturnReference     String?                 @db.VarChar(300)
+  issuer                  String                  @db.VarChar(300)
+  receivedByEmployee      String?                 @db.VarChar(300)
+  status                  ChequeStatus            @default(RECEIVED)
+  replacementChequeId     String?                 @unique
+  demandLetterDate        DateTime?
+  demandDeadline          DateTime?
+  criminalComplaintStatus CriminalComplaintStatus @default(NOT_REPORTED)
+  comments                String?                 @db.MediumText
+  importBatchId           String?
+  isDemo                  Boolean                 @default(false)
+  version                 Int                     @default(1)
+  createdById             String
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+  isDeleted               Boolean                 @default(false)
+  deletedAt               DateTime?
+  deletedById             String?
+  deletionReason          String?                 @db.Text
+  deletionBatchId         String?
+  restoredAt              DateTime?
+  restoredById            String?
+  restorationReason       String?                 @db.Text
+  archivedAt              DateTime?
+
+  case        Case            @relation(fields: [caseId], references: [id])
+  subFile     SubFile?        @relation(fields: [subFileId], references: [id])
+  replacement Cheque?         @relation("ChequeReplacement", fields: [replacementChequeId], references: [id])
+  replaces    Cheque?         @relation("ChequeReplacement")
+  invoices    ChequeInvoice[]
+  recoveries  Recovery[]
+
+  @@index([caseId, isDeleted])
+  @@index([chequeNumber])
+  @@index([status])
+}
+
+model ChequeInvoice {
+  chequeId  String
+  invoiceId String
+  amount    Decimal @db.Decimal(18, 2)
+
+  cheque  Cheque  @relation(fields: [chequeId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@id([chequeId, invoiceId])
+}
+
+// ═════════════════ Interviews & statements ═════════════════
+
+model Interview {
+  id                 String        @id @default(cuid())
+  caseId             String
+  partyId            String?
+  interviewDate      DateTime
+  location           String?       @db.VarChar(300)
+  interviewers       String        @db.VarChar(300)
+  personsPresent     String?       @db.Text
+  interviewType      InterviewType
+  questionsCovered   String?       @db.MediumText
+  summaryOfResponses String?       @db.MediumText
+  admissions         String?       @db.MediumText
+  contradictions     String?       @db.MediumText
+  documentsShown     String?       @db.MediumText
+  followUpQuestions  String?       @db.MediumText
+  signedStatementId  String?       @unique
+  conclusion         String?       @db.MediumText
+  nextAction         String?       @db.VarChar(300)
+  isDemo             Boolean       @default(false)
+  version            Int           @default(1)
+  createdById        String
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  isDeleted          Boolean       @default(false)
+  deletedAt          DateTime?
+  deletedById        String?
+  deletionReason     String?       @db.Text
+  deletionBatchId    String?
+  restoredAt         DateTime?
+  restoredById       String?
+  restorationReason  String?       @db.Text
+  archivedAt         DateTime?
+
+  case            Case            @relation(fields: [caseId], references: [id])
+  party           Party?          @relation(fields: [partyId], references: [id])
+  signedStatement PartyStatement? @relation(fields: [signedStatementId], references: [id])
+
+  @@index([caseId, isDeleted])
+}
+
+model PartyStatement {
+  id                String        @id @default(cuid())
+  caseId            String
+  partyId           String?
+  kind              StatementKind
+  statementDate     DateTime
+  recordedBy        String        @db.VarChar(300)
+  summary           String        @db.MediumText
+  signed            Boolean       @default(false)
+  evidenceId        String?       @unique
+  isDemo            Boolean       @default(false)
+  version           Int           @default(1)
+  createdById       String
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  isDeleted         Boolean       @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?       @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?       @db.Text
+  archivedAt        DateTime?
+
+  case      Case       @relation(fields: [caseId], references: [id])
+  party     Party?     @relation(fields: [partyId], references: [id])
+  evidence  Evidence?  @relation(fields: [evidenceId], references: [id])
+  interview Interview?
+
+  @@index([caseId, isDeleted])
+}
+
+// ═════════════════════ Work-done log & tasks ═════════════════════
+
+model WorkLog {
+  id                   String                 @id @default(cuid())
+  caseId               String
+  subFileId            String?
+  occurredAt           DateTime
+  location             String?                @db.VarChar(300)
+  investigatorId       String
+  workPerformed        String                 @db.MediumText
+  personContacted      String?                @db.VarChar(300)
+  documentsReviewed    String?                @db.MediumText
+  evidenceObtained     String?                @db.MediumText
+  outcome              String?                @db.MediumText
+  findings             String?                @db.MediumText
+  amountVerified       Decimal?               @db.Decimal(18, 2)
+  amountRecovered      Decimal?               @db.Decimal(18, 2)
+  challenges           String?                @db.MediumText
+  nextTask             String?                @db.VarChar(300)
+  responsibleOfficerId String?
+  dueDate              DateTime?
+  completionDate       DateTime?
+  status               WorkLogStatus          @default(OPEN)
+  supervisorReview     String?                @db.MediumText
+  supervisorStatus     SupervisorReviewStatus @default(PENDING)
+  supervisorId         String?
+  supervisorReviewedAt DateTime?
+  importBatchId        String?
+  isDemo               Boolean                @default(false)
+  version              Int                    @default(1)
+  createdById          String
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  isDeleted            Boolean                @default(false)
+  deletedAt            DateTime?
+  deletedById          String?
+  deletionReason       String?                @db.Text
+  deletionBatchId      String?
+  restoredAt           DateTime?
+  restoredById         String?
+  restorationReason    String?                @db.Text
+  archivedAt           DateTime?
+
+  case               Case     @relation(fields: [caseId], references: [id])
+  subFile            SubFile? @relation(fields: [subFileId], references: [id])
+  investigator       User     @relation("WorkLogInvestigator", fields: [investigatorId], references: [id])
+  responsibleOfficer User?    @relation("WorkLogResponsible", fields: [responsibleOfficerId], references: [id])
+  followUps          Task[]
+
+  @@index([caseId, occurredAt])
+  @@index([caseId, isDeleted])
+}
+
+model Task {
+  id                String       @id @default(cuid())
+  reference         String       @unique @db.VarChar(300)
+  caseId            String
+  subFileId         String?
+  title             String       @db.VarChar(300)
+  description       String?      @db.MediumText
+  category          TaskCategory @default(GENERAL)
+  status            TaskStatus   @default(NOT_STARTED)
+  priority          Priority     @default(MEDIUM)
+  assigneeId        String?
+  dueDate           DateTime?
+  externalParty     String?      @db.VarChar(300)
+  // Record the task follows up (CHEQUE, INVOICE, CRIMINAL_MATTER, CIVIL_MATTER, COURT_EVENT, FINDING …)
+  linkType          String?      @db.VarChar(300)
+  linkId            String?      @db.VarChar(300)
+  sourceWorkLogId   String?
+  completedAt       DateTime?
+  importBatchId     String?
+  isDemo            Boolean      @default(false)
+  version           Int          @default(1)
+  createdById       String
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  isDeleted         Boolean      @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?      @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?      @db.Text
+  archivedAt        DateTime?
+
+  case          Case     @relation(fields: [caseId], references: [id])
+  subFile       SubFile? @relation(fields: [subFileId], references: [id])
+  assignee      User?    @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  sourceWorkLog WorkLog? @relation(fields: [sourceWorkLogId], references: [id])
+
+  @@index([assigneeId, status])
+  @@index([dueDate])
+  @@index([caseId, status])
+  @@index([caseId, isDeleted])
+  @@index([linkType, linkId])
+}
+
+// ═════════════════════ Files & evidence ═════════════════════
+
+// Content stored under STORAGE_DIR with a random name. Originals are read-only forever.
+model StoredFile {
+  id           String   @id @default(cuid())
+  sha256       String
+  storageKey   String   @unique
+  originalName String   @db.Text
+  mimeType     String
+  sizeBytes    Int
+  readOnly     Boolean  @default(true)
+  scanStatus   String   @default("NOT_SCANNED") // malware-scanning integration point
+  uploadedById String
+  createdAt    DateTime @default(now())
+
+  @@index([sha256])
+}
+
+model Evidence {
+  id                String           @id @default(cuid())
+  reference         String           @unique @db.VarChar(300)
+  caseId            String
+  subFileId         String?
+  sequence          Int
+  title             String           @db.VarChar(300)
+  category          EvidenceCategory
+  source            String?          @db.VarChar(300)
+  provider          String?          @db.VarChar(300)
+  dateReceived      DateTime?
+  uploadedById      String
+  originalFileId    String           @unique
+  sha256            String           @db.VarChar(300)
+  originalFilename  String           @db.VarChar(300)
+  confidentiality   Confidentiality  @default(CONFIDENTIAL)
+  notes             String?          @db.MediumText
+  legalHold         Boolean          @default(false)
+  // Optional link to the record this evidence supports (INVOICE, CHEQUE, INTERVIEW, WORK_LOG, EXPENSE,
+  // ADVANCE, RECOVERY, COURT_EVENT, CRIMINAL_MILESTONE, DISCIPLINARY, WRITE_OFF).
+  linkType          String?          @db.VarChar(300)
+  linkId            String?          @db.VarChar(300)
+  isDemo            Boolean          @default(false)
+  version           Int              @default(1)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  isDeleted         Boolean          @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?          @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?          @db.Text
+  archivedAt        DateTime?
+
+  case       Case              @relation(fields: [caseId], references: [id])
+  subFile    SubFile?          @relation(fields: [subFileId], references: [id])
+  uploadedBy User              @relation("EvidenceUploader", fields: [uploadedById], references: [id])
+  versions   EvidenceVersion[]
+  accessLog  EvidenceAccess[]
+  custody    CustodyEvent[]
+  statement  PartyStatement?
+
+  @@unique([caseId, sequence])
+  @@index([sha256])
+  @@index([linkType, linkId])
+  @@index([caseId, isDeleted])
+}
+
+// Working copies. Version 1 is created from the original at upload; the original is never touched.
+model EvidenceVersion {
+  id          String   @id @default(cuid())
+  evidenceId  String
+  version     Int
+  fileId      String   @unique
+  sha256      String
+  note        String?  @db.Text
+  createdById String
+  createdAt   DateTime @default(now())
+
+  evidence Evidence @relation(fields: [evidenceId], references: [id])
+
+  @@unique([evidenceId, version])
+}
+
+model EvidenceAccess {
+  id         String               @id @default(cuid())
+  evidenceId String
+  userId     String
+  action     EvidenceAccessAction
+  detail     String?              @db.Text
+  ipAddress  String?
+  createdAt  DateTime             @default(now())
+
+  evidence Evidence @relation(fields: [evidenceId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@index([evidenceId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model CustodyEvent {
+  id           String   @id @default(cuid())
+  evidenceId   String
+  action       String // RECEIVED | TRANSFERRED | RETURNED | SUBMITTED_TO_AUTHORITY | STORED
+  fromHolder   String?  @db.Text
+  toHolder     String   @db.Text
+  purpose      String   @db.Text
+  occurredAt   DateTime
+  recordedById String
+  createdAt    DateTime @default(now())
+
+  evidence   Evidence @relation(fields: [evidenceId], references: [id])
+  recordedBy User     @relation(fields: [recordedById], references: [id])
+
+  @@index([evidenceId])
+}
+
+// ═════════════ Findings, recommendations & decisions ═════════════
+
+model Finding {
+  id                     String              @id @default(cuid())
+  caseId                 String
+  subFileId              String?
+  title                  String              @db.VarChar(300)
+  allegations            String              @db.MediumText
+  scopeCompleted         String?             @db.MediumText
+  documentsReviewed      String?             @db.MediumText
+  interviewsCompleted    String?             @db.MediumText
+  financialAnalysis      String?             @db.MediumText
+  factsEstablished       String?             @db.MediumText
+  factsNotEstablished    String?             @db.MediumText
+  controlFailures        String?             @db.MediumText
+  confirmedAmount        Decimal             @default(0) @db.Decimal(18, 2)
+  disputedAmount         Decimal             @default(0) @db.Decimal(18, 2)
+  recoveredAmount        Decimal             @default(0) @db.Decimal(18, 2)
+  unresolvedIssues       String?             @db.MediumText
+  evidenceSufficiency    EvidenceSufficiency @default(PARTLY_SUFFICIENT)
+  investigatorConclusion String?             @db.MediumText
+  status                 FindingStatus       @default(DRAFT)
+  submittedAt            DateTime?
+  isDemo                 Boolean             @default(false)
+  version                Int                 @default(1)
+  createdById            String
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  isDeleted              Boolean             @default(false)
+  deletedAt              DateTime?
+  deletedById            String?
+  deletionReason         String?             @db.Text
+  deletionBatchId        String?
+  restoredAt             DateTime?
+  restoredById           String?
+  restorationReason      String?             @db.Text
+  archivedAt             DateTime?
+
+  case            Case                 @relation(fields: [caseId], references: [id])
+  subFile         SubFile?             @relation(fields: [subFileId], references: [id])
+  recommendations Recommendation[]
+  decisions       ManagementDecision[]
+
+  @@index([caseId, isDeleted])
+}
+
+model Recommendation {
+  id          String             @id @default(cuid())
+  findingId   String
+  type        RecommendationType
+  details     String?            @db.Text
+  // Set from the management decision: null = undecided.
+  approved    Boolean?
+  createdById String
+  createdAt   DateTime           @default(now())
+
+  finding Finding @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@unique([findingId, type])
+}
+
+model ManagementDecision {
+  id           String          @id @default(cuid())
+  findingId    String
+  outcome      DecisionOutcome
+  approverId   String
+  decisionDate DateTime
+  conditions   String?         @db.Text
+  comments     String?         @db.Text
+  createdAt    DateTime        @default(now())
+
+  finding Finding @relation(fields: [findingId], references: [id])
+
+  @@index([findingId])
+}
+
+// ═════════════════════ Legal pathways ═════════════════════
+
+model CriminalMatter {
+  id                   String         @id @default(cuid())
+  caseId               String
+  dateReported         DateTime?
+  policeStation        String         @db.VarChar(300)
+  county               String?        @db.VarChar(300)
+  town                 String?        @db.VarChar(300)
+  obNumber             String?        @db.VarChar(300)
+  policeReference      String?        @db.VarChar(300)
+  investigatingOfficer String?        @db.VarChar(300)
+  officerRank          String?        @db.VarChar(300)
+  officerTelephone     String?        @db.VarChar(300)
+  officerEmail         String?        @db.VarChar(254)
+  documentsHandedOver  String?        @db.MediumText
+  internalOfficerId    String?
+  status               CriminalStatus @default(PREPARING)
+  courtCaseNumber      String?        @db.VarChar(300)
+  court                String?        @db.VarChar(300)
+  isDemo               Boolean        @default(false)
+  version              Int            @default(1)
+  createdById          String
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  isDeleted            Boolean        @default(false)
+  deletedAt            DateTime?
+  deletedById          String?
+  deletionReason       String?        @db.Text
+  deletionBatchId      String?
+  restoredAt           DateTime?
+  restoredById         String?
+  restorationReason    String?        @db.Text
+  archivedAt           DateTime?
+
+  case       Case                @relation(fields: [caseId], references: [id])
+  milestones CriminalMilestone[]
+
+  @@index([caseId, isDeleted])
+  @@index([obNumber])
+  @@index([policeStation])
+}
+
+model CriminalMilestone {
+  id                String                @id @default(cuid())
+  matterId          String
+  milestone         CriminalMilestoneType
+  milestoneDate     DateTime
+  outcome           String?               @db.VarChar(300)
+  notes             String?               @db.MediumText
+  nextDate          DateTime?
+  nextTask          String?               @db.VarChar(300)
+  responsibleParty  String?               @db.VarChar(300)
+  importBatchId     String?
+  isDemo            Boolean               @default(false)
+  createdById       String
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  isDeleted         Boolean               @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?               @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?               @db.Text
+  archivedAt        DateTime?
+
+  matter CriminalMatter @relation(fields: [matterId], references: [id])
+
+  @@index([matterId, milestoneDate])
+  @@index([nextDate])
+}
+
+model CivilMatter {
+  id                     String      @id @default(cuid())
+  caseId                 String
+  referralDate           DateTime?
+  legalFirm              String      @db.VarChar(300)
+  advocate               String      @db.VarChar(300)
+  advocateContacts       String?     @db.VarChar(300)
+  internalLegalOfficerId String?
+  demandLetterDate       DateTime?
+  amountDemanded         Decimal     @default(0) @db.Decimal(18, 2)
+  debtorResponse         String?     @db.MediumText
+  approvalToSue          Boolean     @default(false)
+  approvalToSueDate      DateTime?
+  filingDate             DateTime?
+  court                  String?     @db.VarChar(300)
+  courtStation           String?     @db.VarChar(300)
+  courtCaseNumber        String?     @db.VarChar(300)
+  plaintiff              String?     @db.VarChar(300)
+  defendant              String?     @db.VarChar(300)
+  amountClaimed          Decimal     @default(0) @db.Decimal(18, 2)
+  securityOrGuarantee    String?     @db.VarChar(300)
+  status                 CivilStatus @default(REFERRED)
+  isDemo                 Boolean     @default(false)
+  version                Int         @default(1)
+  createdById            String
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+  isDeleted              Boolean     @default(false)
+  deletedAt              DateTime?
+  deletedById            String?
+  deletionReason         String?     @db.Text
+  deletionBatchId        String?
+  restoredAt             DateTime?
+  restoredById           String?
+  restorationReason      String?     @db.Text
+  archivedAt             DateTime?
+
+  case       Case         @relation(fields: [caseId], references: [id])
+  events     CourtEvent[]
+  recoveries Recovery[]
+
+  @@index([caseId, isDeleted])
+  @@index([courtCaseNumber])
+  @@index([advocate])
+}
+
+model CourtEvent {
+  id                String         @id @default(cuid())
+  matterId          String
+  eventType         CourtEventType
+  eventDate         DateTime
+  outcome           String?        @db.MediumText
+  orders            String?        @db.MediumText
+  nextCourtDate     DateTime?
+  nextTask          String?        @db.VarChar(300)
+  responsibleParty  String?        @db.VarChar(300)
+  importBatchId     String?
+  isDemo            Boolean        @default(false)
+  createdById       String
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  isDeleted         Boolean        @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?        @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?        @db.Text
+  archivedAt        DateTime?
+
+  matter CivilMatter @relation(fields: [matterId], references: [id])
+
+  @@index([matterId, eventDate])
+  @@index([nextCourtDate])
+}
+
+model DisciplinaryCase {
+  id                String             @id @default(cuid())
+  caseId            String
+  employeeName      String             @db.VarChar(300)
+  employeeNumber    String?            @db.VarChar(300)
+  hrReferralDate    DateTime?
+  applicablePolicy  String?            @db.VarChar(300)
+  showCauseDate     DateTime?
+  employeeResponse  String?            @db.MediumText
+  hearingDate       DateTime?
+  decision          String?            @db.MediumText
+  decisionDate      DateTime?
+  recoveryOrdered   Decimal            @default(0) @db.Decimal(18, 2)
+  appeal            String?            @db.MediumText
+  finalOutcome      String?            @db.MediumText
+  status            DisciplinaryStatus @default(HR_REFERRAL)
+  closedAt          DateTime?
+  isDemo            Boolean            @default(false)
+  version           Int                @default(1)
+  createdById       String
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  isDeleted         Boolean            @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?            @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?            @db.Text
+  archivedAt        DateTime?
+
+  case Case @relation(fields: [caseId], references: [id])
+
+  @@index([caseId, isDeleted])
+}
+
+model WriteOff {
+  id                       String         @id @default(cuid())
+  reference                String         @unique @db.VarChar(300)
+  caseId                   String
+  subFileId                String?
+  amount                   Decimal        @db.Decimal(18, 2)
+  reason                   String         @db.MediumText
+  recoveryActionsAttempted String?        @db.MediumText
+  legalOpinion             String?        @db.MediumText
+  financeReviewById        String?
+  financeReviewAt          DateTime?
+  financeReviewNotes       String?        @db.MediumText
+  managementApprovalById   String?
+  managementApprovalAt     DateTime?
+  boardApprovalRequired    Boolean        @default(false)
+  boardApprovalReference   String?        @db.VarChar(300)
+  boardApprovalDate        DateTime?
+  accountingEntryReference String?        @db.VarChar(300)
+  continuingRecovery       Boolean        @default(false)
+  status                   WriteOffStatus @default(DRAFT)
+  closedAt                 DateTime?
+  isDemo                   Boolean        @default(false)
+  version                  Int            @default(1)
+  createdById              String
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+  isDeleted                Boolean        @default(false)
+  deletedAt                DateTime?
+  deletedById              String?
+  deletionReason           String?        @db.Text
+  deletionBatchId          String?
+  restoredAt               DateTime?
+  restoredById             String?
+  restorationReason        String?        @db.Text
+  archivedAt               DateTime?
+
+  case    Case     @relation(fields: [caseId], references: [id])
+  subFile SubFile? @relation(fields: [subFileId], references: [id])
+
+  @@index([caseId, isDeleted])
+}
+
+// ═════════════════ Costs, budgets & recoveries ═════════════════
+
+model Expense {
+  id                String              @id @default(cuid())
+  reference         String              @unique @db.VarChar(300)
+  caseId            String
+  subFileId         String?
+  workLogId         String?
+  advanceId         String?
+  stage             InvestigationStage?
+  pathway           CostPathway         @default(INVESTIGATION)
+  category          ExpenseCategory
+  description       String              @db.VarChar(300)
+  expenseDate       DateTime
+  location          String?             @db.VarChar(300)
+  employeeId        String?
+  payee             String?             @db.VarChar(300)
+  paymentMethod     PaymentMethod       @default(CASH)
+  currency          String              @default("KES") @db.VarChar(3)
+  amountBeforeTax   Decimal             @db.Decimal(18, 2)
+  tax               Decimal             @default(0) @db.Decimal(18, 2)
+  totalAmount       Decimal             @db.Decimal(18, 2)
+  requestedAmount   Decimal             @db.Decimal(18, 2)
+  approvedAmount    Decimal             @default(0) @db.Decimal(18, 2)
+  paidAmount        Decimal             @default(0) @db.Decimal(18, 2)
+  rejectedAmount    Decimal             @default(0) @db.Decimal(18, 2)
+  costCentre        String?             @db.VarChar(300)
+  status            ExpenseStatus       @default(DRAFT)
+  approverId        String?
+  approvedAt        DateTime?
+  approvalComment   String?             @db.Text
+  paymentReference  String?             @db.VarChar(300)
+  recoverability    Recoverability      @default(UNDER_REVIEW)
+  notes             String?             @db.MediumText
+  importBatchId     String?
+  isDemo            Boolean             @default(false)
+  version           Int                 @default(1)
+  createdById       String
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  isDeleted         Boolean             @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?             @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?             @db.Text
+  archivedAt        DateTime?
+
+  case     Case     @relation(fields: [caseId], references: [id])
+  subFile  SubFile? @relation(fields: [subFileId], references: [id])
+  employee User?    @relation("ExpenseEmployee", fields: [employeeId], references: [id])
+  advance  Advance? @relation(fields: [advanceId], references: [id])
+
+  @@index([caseId, status])
+  @@index([caseId, isDeleted])
+  @@index([category])
+}
+
+model Advance {
+  id                 String        @id @default(cuid())
+  reference          String        @unique @db.VarChar(300)
+  caseId             String
+  employeeId         String
+  purpose            String        @db.VarChar(300)
+  amountRequested    Decimal       @db.Decimal(18, 2)
+  amountApproved     Decimal       @default(0) @db.Decimal(18, 2)
+  amountIssued       Decimal       @default(0) @db.Decimal(18, 2)
+  amountReturned     Decimal       @default(0) @db.Decimal(18, 2)
+  issuedAt           DateTime?
+  accountingDeadline DateTime?
+  accountingDate     DateTime?
+  status             AdvanceStatus @default(REQUESTED)
+  approverId         String?
+  approvedAt         DateTime?
+  notes              String?       @db.MediumText
+  importBatchId      String?
+  isDemo             Boolean       @default(false)
+  version            Int           @default(1)
+  createdById        String
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  isDeleted          Boolean       @default(false)
+  deletedAt          DateTime?
+  deletedById        String?
+  deletionReason     String?       @db.Text
+  deletionBatchId    String?
+  restoredAt         DateTime?
+  restoredById       String?
+  restorationReason  String?       @db.Text
+  archivedAt         DateTime?
+
+  case     Case      @relation(fields: [caseId], references: [id])
+  employee User      @relation("AdvanceEmployee", fields: [employeeId], references: [id])
+  expenses Expense[]
+
+  @@index([caseId, isDeleted])
+  @@index([status, accountingDeadline])
+}
+
+model Budget {
+  id                String       @id @default(cuid())
+  caseId            String
+  pathway           CostPathway
+  approvedAmount    Decimal      @db.Decimal(18, 2)
+  status            BudgetStatus @default(PROPOSED)
+  approverId        String?
+  approvedAt        DateTime?
+  notes             String?      @db.MediumText
+  isDemo            Boolean      @default(false)
+  version           Int          @default(1)
+  createdById       String
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  isDeleted         Boolean      @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?      @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?      @db.Text
+  archivedAt        DateTime?
+
+  case Case @relation(fields: [caseId], references: [id])
+
+  @@index([caseId, isDeleted])
+}
+
+model Recovery {
+  id                String         @id @default(cuid())
+  reference         String         @unique @db.VarChar(300)
+  caseId            String
+  subFileId         String?
+  recoveryDate      DateTime
+  payer             String         @db.VarChar(300)
+  invoiceId         String?
+  chequeId          String?
+  civilMatterId     String?
+  method            RecoveryMethod
+  grossAmount       Decimal        @db.Decimal(18, 2)
+  recoveryCosts     Decimal        @default(0) @db.Decimal(18, 2)
+  paymentReference  String?        @db.VarChar(300)
+  receivingAccount  String?        @db.VarChar(300)
+  receiptNumber     String?        @db.VarChar(300)
+  status            RecoveryStatus @default(RECORDED)
+  recordedById      String
+  verifiedById      String?
+  verifiedAt        DateTime?
+  rejectionReason   String?        @db.Text
+  // Snapshot of the case's outstanding principal after this recovery was verified.
+  remainingBalance  Decimal?       @db.Decimal(18, 2)
+  notes             String?        @db.MediumText
+  importBatchId     String?
+  isDemo            Boolean        @default(false)
+  version           Int            @default(1)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  isDeleted         Boolean        @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?        @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?        @db.Text
+  archivedAt        DateTime?
+
+  case        Case         @relation(fields: [caseId], references: [id])
+  subFile     SubFile?     @relation(fields: [subFileId], references: [id])
+  invoice     Invoice?     @relation(fields: [invoiceId], references: [id])
+  cheque      Cheque?      @relation(fields: [chequeId], references: [id])
+  civilMatter CivilMatter? @relation(fields: [civilMatterId], references: [id])
+
+  @@index([caseId, status])
+  @@index([caseId, isDeleted])
+  @@index([recoveryDate])
+}
+
+// ═════════════════ Bank & M-Pesa statement analysis ═════════════════
+
+model FinancialStatement {
+  id                  String          @id @default(cuid())
+  reference           String          @unique @db.VarChar(300)
+  caseId              String
+  subFileId           String?
+  ownerName           String          @db.VarChar(300)
+  relatedPartyId      String?
+  institutionType     InstitutionType
+  institution         String          @db.VarChar(300)
+  accountType         String?         @db.VarChar(300)
+  maskedAccount       String          @db.VarChar(300)
+  periodStart         DateTime?
+  periodEnd           DateTime?
+  currency            String          @default("KES") @db.VarChar(3)
+  source              String?         @db.VarChar(300)
+  dateReceived        DateTime?
+  processingAuthority String          @db.VarChar(300)
+  format              StatementFormat
+  originalFileId      String          @unique
+  originalFilename    String          @db.VarChar(300)
+  sha256              String          @db.VarChar(300)
+  uploadedById        String
+  status              StatementStatus @default(UPLOADED)
+  parserUsed          String?
+  parseMessage        String?         @db.MediumText
+  transactionCount    Int             @default(0)
+  analysedAt          DateTime?
+  reviewedById        String?
+  reviewedAt          DateTime?
+  isDemo              Boolean         @default(false)
+  version             Int             @default(1)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  isDeleted           Boolean         @default(false)
+  deletedAt           DateTime?
+  deletedById         String?
+  deletionReason      String?         @db.Text
+  deletionBatchId     String?
+  restoredAt          DateTime?
+  restoredById        String?
+  restorationReason   String?         @db.Text
+  archivedAt          DateTime?
+
+  case         Case                   @relation(fields: [caseId], references: [id])
+  subFile      SubFile?               @relation(fields: [subFileId], references: [id])
+  relatedParty Party?                 @relation(fields: [relatedPartyId], references: [id])
+  transactions StatementTransaction[]
+
+  @@index([caseId, isDeleted])
+}
+
+model StatementTransaction {
+  id                  String   @id @default(cuid())
+  statementId         String
+  rowNumber           Int
+  txnDate             DateTime
+  txnTime             String?
+  reference           String?  @db.VarChar(300)
+  description         String   @db.Text
+  debit               Decimal  @default(0) @db.Decimal(18, 2)
+  credit              Decimal  @default(0) @db.Decimal(18, 2)
+  balance             Decimal? @db.Decimal(18, 2)
+  counterpartyName    String?  @db.VarChar(300)
+  counterpartyPhone   String?
+  counterpartyAccount String?
+  // Pattern flags from automated analysis (leads, not proof): DIRECT_TRANSFER, REPEATED_TRANSFER,
+  // SPLIT_TRANSACTION, CIRCULAR_MOVEMENT, ROUND_FIGURE, RAPID_WITHDRAWAL, INVOICE_DATE_MATCH,
+  // UNKNOWN_COUNTERPARTY
+  flags               Json // string[]
+  excluded            Boolean  @default(false)
+  isDemo              Boolean  @default(false)
+
+  statement FinancialStatement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  links     TransactionLink[]
+
+  @@unique([statementId, rowNumber])
+  @@index([statementId, txnDate])
+  @@index([reference])
+  @@index([counterpartyPhone])
+  @@index([counterpartyAccount])
+}
+
+model TransactionLink {
+  id            String     @id @default(cuid())
+  transactionId String
+  targetType    LinkTarget
+  targetId      String
+  targetLabel   String     @db.Text
+  linkClass     LinkClass
+  score         Int // 0–100 strength of the lead. Not proof.
+  rationale     String     @db.Text
+  status        LinkStatus @default(SUGGESTED)
+  reviewedById  String?
+  reviewedAt    DateTime?
+  reviewNote    String?    @db.Text
+  createdAt     DateTime   @default(now())
+
+  transaction StatementTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@unique([transactionId, targetType, targetId])
+  @@index([status])
+}
+
+model KnownAccount {
+  id                String    @id @default(cuid())
+  caseId            String
+  partyId           String?
+  holderName        String    @db.VarChar(300)
+  institution       String?   @db.VarChar(300)
+  accountRef        String?   @db.VarChar(300) // account number or till/paybill
+  telephone         String?   @db.VarChar(300)
+  notes             String?   @db.MediumText
+  isDemo            Boolean   @default(false)
+  version           Int       @default(1)
+  createdById       String
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  isDeleted         Boolean   @default(false)
+  deletedAt         DateTime?
+  deletedById       String?
+  deletionReason    String?   @db.Text
+  deletionBatchId   String?
+  restoredAt        DateTime?
+  restoredById      String?
+  restorationReason String?   @db.Text
+  archivedAt        DateTime?
+
+  case  Case   @relation(fields: [caseId], references: [id])
+  party Party? @relation(fields: [partyId], references: [id])
+
+  @@index([caseId, isDeleted])
+  @@index([telephone])
+  @@index([accountRef])
+}
+
+// ═════════════════ Data administration ═════════════════
+
+model ImportBatch {
+  id                String            @id @default(cuid())
+  reference         String            @unique
+  entityType        String
+  caseId            String?
+  fileName          String            @db.Text
+  fileSha256        String
+  // The uploaded file (read-only), kept so the batch can be re-mapped and audited.
+  fileId            String?
+  idempotencyKey    String            @unique
+  mode              ImportMode
+  duplicateStrategy DuplicateStrategy
+  mapping           Json
+  status            ImportStatus      @default(VALIDATED)
+  totalRows         Int               @default(0)
+  validRows         Int               @default(0)
+  invalidRows       Int               @default(0)
+  duplicateRows     Int               @default(0)
+  importedRows      Int               @default(0)
+  updatedRows       Int               @default(0)
+  skippedRows       Int               @default(0)
+  failedRows        Int               @default(0)
+  message           String?           @db.Text
+  createdById       String
+  createdAt         DateTime          @default(now())
+  completedAt       DateTime?
+
+  rows ImportRow[]
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+model ImportRow {
+  id            String          @id @default(cuid())
+  batchId       String
+  rowNumber     Int
+  data          Json
+  status        ImportRowStatus
+  errors        Json // string[]
+  duplicateOfId String?
+  resultId      String?
+
+  batch ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId, status])
+}
+
+model BulkActionBatch {
+  id            String         @id @default(cuid())
+  reference     String         @unique
+  action        BulkActionType
+  entityType    String
+  reason        String?        @db.Text
+  parameters    Json?
+  recordIds     Json // string[]
+  affectedCount Int
+  skipped       Json? // [{ id, reason }]
+  createdById   String
+  createdAt     DateTime       @default(now())
+  restoredAt    DateTime?
+  restoredById  String?
+
+  @@index([createdAt])
+}
+
+model DeletionRequest {
+  id                String                @id @default(cuid())
+  reference         String                @unique
+  entityType        String
+  entityIds         Json // string[]
+  reason            String                @db.Text
+  checks            Json // results of retention, dependency, legal-hold and protection checks
+  status            DeletionRequestStatus @default(PENDING)
+  requestedById     String
+  requestedAt       DateTime              @default(now())
+  requesterReauthAt DateTime
+  approverId        String?
+  approverReauthAt  DateTime?
+  decidedAt         DateTime?
+  decisionComment   String?               @db.Text
+  executedAt        DateTime?
+
+  @@index([status])
+}
+
+// Authorises an approved permanent-deletion transaction to remove one case's append-only history.
+// The purge inserts (caseId, CONNECTION_ID()) inside its transaction and deletes the row again
+// before committing, so the token is never visible to any other connection. The history triggers
+// and the Case delete trigger accept a delete only while a token for that case exists on the
+// current connection (see the guards migration). Not used outside permanent-deletion.ts.
+model PurgeToken {
+  caseId       String
+  connectionId BigInt   @db.UnsignedBigInt
+  createdAt    DateTime @default(now())
+
+  @@id([caseId, connectionId])
+}
+
+model Job {
+  id         String    @id @default(cuid())
+  type       String // STATEMENT_PARSE | IMPORT_COMMIT | REMINDER_SWEEP
+  payload    Json
+  status     JobStatus @default(QUEUED)
+  attempts   Int       @default(0)
+  runAfter   DateTime  @default(now())
+  lastError  String?   @db.Text
+  result     Json?
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  @@index([status, runAfter])
+  // Job claiming (src/server/jobs/queue.ts) reads QUEUED rows in createdAt order with FOR UPDATE
+  // SKIP LOCKED. Without this index InnoDB locks every queued row before sorting, and concurrent
+  // workers then skip all of them; with it, each worker locks only the row it takes.
+  @@index([status, createdAt])
+}
+
+// ═════════════════ Reports, notifications, audit ═════════════════
+
+model GeneratedReport {
+  id            String       @id @default(cuid())
+  reference     String       @unique
+  caseId        String?
+  reportType    String
+  format        ReportFormat
+  filters       Json?
+  rowCount      Int
+  fileId        String?
+  isFinal       Boolean      @default(false)
+  approvedById  String?
+  approvedAt    DateTime?
+  generatedById String
+  createdAt     DateTime     @default(now())
+
+  case Case? @relation(fields: [caseId], references: [id])
+
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  kind      String // DUE_SOON | DUE_TODAY | OVERDUE | INACTIVE_CASE | COURT_DATE | APPROVAL | FOLLOW_UP | SYSTEM
+  title     String    @db.Text
+  body      String    @db.Text
+  link      String?   @db.Text
+  dedupeKey String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+}
+
+// Append-only. Never updated or deleted (enforced by a DB trigger).
+model AuditLog {
+  id         String   @id @default(cuid())
+  at         DateTime @default(now())
+  actorId    String?
+  actorLabel String?
+  action     String
+  entityType String?
+  entityId   String?
+  caseId     String?
+  outcome    String   @default("SUCCESS") // SUCCESS | DENIED | FAILURE
+  reason     String?  @db.Text
+  requestId  String?
+  ipAddress  String?
+  userAgent  String?  @db.VarChar(300)
+  before     Json?
+  after      Json?
+  details    Json?
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([at])
+  @@index([actorId, at])
+  @@index([entityType, entityId])
+  @@index([caseId, at])
+  @@index([action])
+}
+
+model SecurityAlert {
+  id               String        @id @default(cuid())
+  type             AlertType
+  severity         AlertSeverity
+  message          String        @db.Text
+  subjectUserId    String?
+  details          Json?
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  createdAt        DateTime      @default(now())
+
+  @@index([type, createdAt])
+  @@index([acknowledgedAt])
+}
+
+// ═════════════════ Access requests and data-change approval ═════════════════
+
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ChangeRequestStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  WITHDRAWN
+  FAILED
+}
+
+enum ChangeOperation {
+  CREATE
+  UPDATE
+  IMPORT
+}
+
+/// Submitted from the sign-in screen by someone without an account. An administrator decides the
+/// role, units (company/branch scopes), clearance and restrictions when approving it.
+model AccessRequest {
+  id              String              @id @default(cuid())
+  reference       String              @unique
+  fullName        String
+  username        String? // chosen by the requester; null only on requests made before it was asked
+  // Argon2 hash of the password the requester chose. Used for the account on approval and cleared
+  // once the request is decided. Never returned by the API.
+  passwordHash    String?             @db.VarChar(255)
+  email           String?             @db.VarChar(254)
+  telephone       String?
+  employeeNumber  String?
+  jobTitle        String?
+  unit            String? // the department or branch the person says they work in (free text)
+  requestedRole   RoleCode?
+  justification   String?             @db.Text
+  status          AccessRequestStatus @default(PENDING)
+  ipAddress       String?
+  createdAt       DateTime            @default(now())
+  decidedById     String?
+  decidedAt       DateTime?
+  decisionComment String?             @db.Text
+  createdUserId   String?             @unique
+
+  @@index([status, createdAt])
+  @@index([email])
+  @@index([username])
+}
+
+/// A create, edit or import of a record type that needs approval. Validated when submitted and
+/// applied only when a different user with approval rights approves it.
+model ChangeRequest {
+  id              String              @id @default(cuid())
+  reference       String              @unique
+  resourceKey     String
+  operation       ChangeOperation
+  recordId        String? // record being edited, or the import batch
+  caseId          String?
+  summary         String              @db.Text
+  payload         Json
+  baseVersion     Int?
+  status          ChangeRequestStatus @default(PENDING)
+  requestedById   String
+  requestedAt     DateTime            @default(now())
+  reviewerId      String?
+  reviewedAt      DateTime?
+  reviewComment   String?             @db.Text
+  appliedRecordId String?
+  failureReason   String?             @db.Text
+
+  requestedBy User  @relation("ChangeRequester", fields: [requestedById], references: [id])
+  reviewer    User? @relation("ChangeReviewer", fields: [reviewerId], references: [id])
+  case        Case? @relation(fields: [caseId], references: [id])
+
+  @@index([status, requestedAt])
+  @@index([requestedById, status])
+  @@index([resourceKey, recordId, status])
+}
